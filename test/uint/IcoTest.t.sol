@@ -5,71 +5,114 @@ pragma solidity ^0.8.24;
 import {Test,console} from "forge-std/Test.sol";
 import {ICO} from "src/ICO.sol";
 import {OurToken} from "src/OurToken.sol";
-import {MockUsdt} from "test/mocks/MockUsdt.sol";
-import {ERC20Mock} from "test/mocks/ERC20Mock.sol";
-import {DeployIco} from "script/DeployIco.s.sol";
-import {MockPyth} from "test/mocks/MockPyth.sol";
+import {MockPyth} from "lib/pyth-sdk-solidity/MockPyth.sol";
 import {StdChains} from "forge-std/StdChains.sol";
 
 contract IcoTest is StdChains, Test {
 
     ICO public ico;
-    OurToken public usdtToken;
-    MockPyth public mockPyth;
+    MockPyth public pyth;
+    OurToken public ethToken;
+    bytes32 ETH_PRICE_FEED_ID = bytes32(uint256(0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace));
 
-    address public user = address(1);
+    uint256 ETH_TO_WEI = 10e24; 
+    // address owner = address(1);
 
 
-    uint256 public constant STARTING_USER_BALANCE = 10 ether;
+    function setUp() public {    
+        pyth = new MockPyth(60,1);
+        ethToken = new OurToken(0);
 
-    address public ethUsdPriceFeed;
-    address public weth;
-    function setUp() public {
+        address[] memory tokenAddresses = new address[](1);
+        tokenAddresses[0] = address(ethToken);
 
-        mockPyth = new MockPyth();
-        wusdt = address(new ERC20Mock("Mock USDT", "mUSDT", address(this), 0));
-        weth = address(new ERC20Mock("Mock WETH", "mWETH", address(this), 0));
-        console.log("weth", weth);
-        console.log("wusdt", wusdt);
-        
-        DeployIco deployer = new DeployIco();
-        (ico, usdtToken) = deployer.run();
-        
-        mockPyth.setPrice(200000000000, wusdt); // set price for the correct token
-        vm.deal(user, STARTING_USER_BALANCE);
+        bytes32[] memory priceFeedIds = new bytes32[](1);
+        priceFeedIds[0] = ETH_PRICE_FEED_ID;
 
-        ERC20Mock(weth).mint(user, STARTING_USER_BALANCE);
-        ERC20Mock(wusdt).mint(user, STARTING_USER_BALANCE);
-    }
-
-    ///////////////////////
-    // Constructor Tests //
-    ///////////////////////
-    
-    address [] public tokenAddress;
-    address [] public feeAddress;
-
-    function testRevertIfTokenAddressesAndPriceFeedAddressesAreNotSameLength() public {
-        tokenAddress.push(weth);
-        tokenAddress.push();
-        feeAddress.push(ethUsdPriceFeed);
-        vm.expectRevert(abi.encodeWithSelector(ICO.TokenAddressesAndPriceFeedAddressesMustBeSameLength.selector));
-        new ICO(
-            tokenAddress,
-            feeAddress,
-            address(usdtToken),
+        // vm.prank(owner);
+        ico = new ICO(
+            tokenAddresses,
+            priceFeedIds,
+            address(pyth),
             msg.sender
         );
+        // ico.transferOwnership(owner);
+
+       
     }
 
     //////////////////
     // Price Tests //
     //////////////////
 
-    function testGetTokenAmountFromUsd() public {
-
-        uint256 expecetedWeth = 0.05 ether;
-        uint256 amountWeth = ico.buyTokens(weth, 100 ether);
-        assertEq(amountWeth, expecetedWeth);
+    function creactEthUpdate(
+        int64 ethPrice
+    ) private view returns(bytes[] memory) {
+        bytes[] memory updateData = new bytes[](1);
+        updateData[0] = pyth.createPriceFeedUpdateData(
+            ETH_PRICE_FEED_ID,
+            ethPrice * 10000,
+            10 * 100000,
+            -5,
+            ethPrice * 10000,
+            10 * 10000,
+            uint64(block.timestamp)
+        );
+        return updateData;
     }
+
+    function testSetEthPrice(int64 ethPrice) private {
+        bytes[] memory updateData = creactEthUpdate(ethPrice); 
+        uint value = pyth.getUpdateFee(updateData);
+        vm.deal(address(this), value);
+        pyth.updatePriceFeeds{ value: value }(updateData);
+    }
+
+    function testMintToken() public {
+        testSetEthPrice(100);
+
+        vm.deal(address(this), ETH_TO_WEI);
+        vm.expectRevert();
+        uint256 tokenAmount = 1000;
+        ico.depositToContract{ value : ETH_TO_WEI / 100}(
+            address(ethToken), 
+            tokenAmount
+        );
+    }
+
+     function testMintStalePrice() public {
+        testSetEthPrice(100);
+
+        skip(50);
+
+        vm.deal(address(this), ETH_TO_WEI);
+        ethToken.mint(address(this), 100000);
+        ethToken.approve(address(ico), 10000);
+        ico.depositToContract{ value : ETH_TO_WEI / 100}(
+            address(ethToken), 
+            100 
+        );
+     }
+
+    //  function testWithdrawEthToken() public {
+    //     testSetEthPrice(100);
+    //     vm.deal(address(this), ETH_TO_WEI);
+
+    //     ethToken.mint(address(this), 100000);
+
+    //     ethToken.approve(address(ico), 10000);
+    //     ico.depositToContract{ value : ETH_TO_WEI / 100}(
+    //         address(ethToken), 
+    //         100 
+    //     );
+
+    //     uint256 balanceBefore = ethToken.balanceOf(address(this));
+    //     vm.prank(owner);
+    //     ico.withdrawTokens(address(ethToken), 100);
+
+    //     uint256 balanceAfter = ethToken.balanceOf(address(this));
+
+    //     assertEq(balanceAfter, balanceBefore + 100);
+
+    //  }
 }   

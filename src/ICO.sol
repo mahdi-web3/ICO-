@@ -25,12 +25,13 @@ pragma solidity ^0.8.24;
 
 
 import {OurToken} from "./OurToken.sol";
-import {ERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import {IPyth} from  "lib/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "lib/pyth-sdk-solidity/PythStructs.sol";
+import {MockPyth} from "lib/pyth-sdk-solidity/MockPyth.sol";
+import {console2} from "forge-std/Test.sol";
  
  
 
@@ -42,18 +43,21 @@ contract ICO is ReentrancyGuard, Ownable {
     error TokenNotAllowed(address token);
     error TransferFailed();
     error AmountFailed();
+    error InsufficientFee();
 
     ///////////////////
     //State variables//
     ///////////////////
     /// @dev Mapping of token address to price feed address. 
-    mapping(address token => address priceFeed) private pricefeedsIds;
+    mapping(address token => bytes32 priceFeed) private pricefeedsIds;
     mapping(address user => mapping(address token => uint256 amount)) private usdtDeposit;
+    mapping(address user => uint256 amountTokenMinted) private s_TokenMinted;
 
     address[] private s_UsdtTokens;
     
     OurToken private immutable usdtToken;
     IPyth private immutable pyth;
+    MockPyth private immutable mockPyth;
     uint256 public constant USDT_DECIMALS = 1e6; // 1 usdt = 1000000
     uint256 public constant ETH_DECIMALS = 1e18;
 
@@ -77,7 +81,7 @@ contract ICO is ReentrancyGuard, Ownable {
     }
 
     modifier isAllowedToken(address token){
-        if (pricefeedsIds[token] == address(0)) {
+        if (pricefeedsIds[token] == bytes32(0)) {
             revert TokenNotAllowed(token);
         }
         _;
@@ -90,18 +94,19 @@ contract ICO is ReentrancyGuard, Ownable {
 
     constructor(
         address [] memory tokenAddress,
-        address [] memory priceFeedsAddress,
-        address usdtTokenAddress,
+        bytes32 [] memory _ethUsdPriceId,
+        address _pyth,
         address initialOwner
     ) Ownable(initialOwner) {
-        if(tokenAddress.length != priceFeedsAddress.length) {
+        if(tokenAddress.length != _ethUsdPriceId.length) {
             revert TokenAddressesAndPriceFeedAddressesMustBeSameLength();
         }
+
         for (uint256 i = 0; i < tokenAddress.length; i++) {
-            pricefeedsIds[tokenAddress[i]] = priceFeedsAddress[i];
-            s_UsdtTokens.push(tokenAddress[i]);
-        }   
-        usdtToken = OurToken(usdtTokenAddress);
+            pricefeedsIds[tokenAddress[i]] = _ethUsdPriceId[i];
+        }
+        pyth = IPyth(_pyth);
+        usdtToken = OurToken(tokenAddress[0]);
     }
 
     ////////////////////////
@@ -109,52 +114,35 @@ contract ICO is ReentrancyGuard, Ownable {
     ////////////////////////
 
     function depositToContract(
-        address usdtTokenAddress,
+        address token,
         uint256 amountToken
     ) external 
+    payable
     moreThanZero(amountToken)
-    isAllowedToken(usdtTokenAddress) 
-    nonReentrant onlyOwner {
-        usdtDeposit[msg.sender][usdtTokenAddress] += amountToken;
-        emit UsdtDeposit(msg.sender, usdtTokenAddress, amountToken);
-
-        bool success = IERC20(usdtTokenAddress).transferFrom(msg.sender, address(this), amountToken);
-        if (!success) {
-            revert TransferFailed();
-        }
-    }
-    
-    function buyTokens(
-        address usdtTokenAddress,
-        uint256 usdtAmount
-        ) external
-        moreThanZero(usdtAmount)
-        nonReentrant onlyOwner returns (uint256) {  
-        
+    isAllowedToken(token) 
+    nonReentrant {
+        bytes32 priceFeedId = pricefeedsIds[token];
         PythStructs.Price memory price = pyth.getPriceNoOlderThan(
-            bytes32(uint256(uint160(pricefeedsIds[usdtTokenAddress]))),
-            300
+            priceFeedId,
+            60
         );
-        int64 exactPrice = price.price; //3006.08
+        uint ethPrice18Decimals = (uint(uint64(price.price)) * (10 ** 18)) /
+            10 ** uint8(uint32(-1 * price.expo));
+        uint oneDollarInWei = ((10 ** 18) * (10 ** 18)) / ethPrice18Decimals;
 
-        // int256 ethPrice = int256(exactPrice) * 1e18;
-        uint256 ethAmount = (usdtAmount * 1e12) / uint256(uint64(exactPrice));
-        emit TokensBought(
-            msg.sender,
-            usdtTokenAddress,
-            usdtAmount,
-            ethAmount
-        );
+        console2.log("required payment in wei");
+        console2.log(oneDollarInWei);
 
-        usdtDeposit[msg.sender][usdtTokenAddress] -= usdtAmount;
-        bool success = IERC20(usdtTokenAddress).transfer(msg.sender, usdtAmount);
-        if (!success) {
-            revert TransferFailed();
+        if (msg.value >= oneDollarInWei) {
+            usdtDeposit[msg.sender][token] += amountToken;
+            emit UsdtDeposit(msg.sender, token, amountToken);
+            IERC20(token).transferFrom(msg.sender, address(this), amountToken);
+        } else {
+            revert InsufficientFee();
         }
-        return ethAmount;
     }
 
-        function redeemTokens(
+        function withdrawTokens(
             address usdtTokenAddress, uint256 amountToken
             ) external
             moreThanZero(amountToken)
@@ -166,5 +154,6 @@ contract ICO is ReentrancyGuard, Ownable {
             if (!success) {
             revert TransferFailed();    
         }
-    }
+        }
+        receive() external payable {}
 }
